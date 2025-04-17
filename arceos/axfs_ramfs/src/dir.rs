@@ -1,9 +1,11 @@
+
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::{string::String, vec::Vec};
 
 use axfs_vfs::{VfsDirEntry, VfsNodeAttr, VfsNodeOps, VfsNodeRef, VfsNodeType};
 use axfs_vfs::{VfsError, VfsResult};
+use log::debug;
 use spin::RwLock;
 
 use crate::file::FileNode;
@@ -65,6 +67,14 @@ impl DirNode {
             }
         }
         children.remove(name);
+        Ok(())
+    }
+
+    pub fn rename_node(&self, old_name: &str, new_name: &str) -> VfsResult {
+        debug!("rename_node {} to {}", old_name, new_name);
+        let mut children = self.children.write();
+        let node = children.remove(old_name).ok_or(VfsError::NotFound)?;
+        children.insert(String::from(new_name), node);
         Ok(())
     }
 }
@@ -163,6 +173,33 @@ impl VfsNodeOps for DirNode {
         } else {
             self.remove_node(name)
         }
+    }
+
+    // only happend in same directory
+    fn rename(&self, src_path: &str, dst_path: &str) -> VfsResult {
+        let (name, rest) = split_path(src_path);
+        if let Some(rest) = rest {
+            match name {
+                "" | "." => self.rename(rest, dst_path),
+                ".." => self.parent().ok_or(VfsError::NotFound)?.rename(rest, dst_path),
+                _ => {
+                    let subdir = self
+                        .children
+                        .read()
+                        .get(name)
+                        .ok_or(VfsError::NotFound)?
+                        .clone();
+                    subdir.rename(rest, dst_path)
+                }
+            }
+        } else if name.is_empty() || name == "." || name == ".." {
+            Err(VfsError::InvalidInput) // remove '.' or '..
+        } else {
+            let trimmed_path = dst_path.trim_end_matches('/');
+            let new_name = trimmed_path.rfind('/').map_or(trimmed_path, |i| {&trimmed_path[i+1..]});
+            self.rename_node(name, new_name)
+        }
+
     }
 
     axfs_vfs::impl_vfs_dir_default! {}
