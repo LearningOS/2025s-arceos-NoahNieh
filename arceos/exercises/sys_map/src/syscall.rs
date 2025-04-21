@@ -2,12 +2,15 @@
 
 use core::ffi::{c_void, c_char, c_int};
 use axhal::arch::TrapFrame;
+use axhal::mem::phys_to_virt;
 use axhal::trap::{register_trap_handler, SYSCALL};
 use axerrno::LinuxError;
-use axtask::current;
+use axtask::{current, TaskExtMut};
 use axtask::TaskExtRef;
 use axhal::paging::MappingFlags;
-use arceos_posix_api as api;
+use arceos_posix_api::{self as api, get_file_like};
+use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange};
+use axstd::vec;
 
 const SYS_IOCTL: usize = 29;
 const SYS_OPENAT: usize = 56;
@@ -140,7 +143,29 @@ fn sys_mmap(
     fd: i32,
     _offset: isize,
 ) -> isize {
-    unimplemented!("no sys_mmap!");
+    let mut buf = vec![0; length];
+    get_file_like(fd).unwrap().read(&mut buf);
+    let hint = current().task_ext().aspace.lock().base();
+    let limit = VirtAddrRange::from_start_size(hint, current().task_ext().aspace.lock().size());
+    let size = VirtAddr::from(length).align_up_4k().as_usize();
+    let free_area = current().task_ext().aspace.lock().find_free_area(hint, size, limit);
+    
+    if let Some(free_area) = free_area {
+        current()
+        .task_ext()
+        .aspace
+        .lock()
+        .map_alloc(free_area, size, MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER, true)
+        .and_then(|_|
+        {
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), free_area.as_mut_ptr(), length);
+            }
+            Ok(usize::from(free_area) as isize)
+        }).unwrap_or(-1)
+    } else {
+        -1
+    }
 }
 
 fn sys_openat(dfd: c_int, fname: *const c_char, flags: c_int, mode: api::ctypes::mode_t) -> isize {
